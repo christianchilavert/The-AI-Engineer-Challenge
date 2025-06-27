@@ -27,8 +27,16 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     developer_message: str  # Message from the developer/system
     user_message: str      # Message from the user
-    model: Optional[str] = "gpt-4.1-mini"  # Optional model selection with default
+    model: Optional[str] = "gpt-4.1"  # Optional model selection with default
     api_key: str          # OpenAI API key for authentication
+
+# Lista de modelos a intentar, en orden de preferencia
+MODEL_CANDIDATES = [
+    "gpt-4.1-nano",
+    "gpt-4.1-mini",
+    "gpt-3.5-turbo",
+    "gpt-4.1"
+]
 
 # Define the main chat endpoint that handles POST requests
 @app.post("/api/chat")
@@ -37,13 +45,48 @@ async def chat(request: ChatRequest):
         # Initialize OpenAI client with the provided API key
         client = OpenAI(api_key=request.api_key)
         
+        # First, test all models to find one that works
+        working_model = None
+        last_exception = None
+        
+        for model_name in MODEL_CANDIDATES:
+            try:
+                # Test the model with a simple request
+                test_response = client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {"role": "user", "content": "test"}
+                    ],
+                    max_tokens=1
+                )
+                working_model = model_name
+                print(f"Model {model_name} is working")
+                break
+            except Exception as e:
+                last_exception = e
+                print(f"Model {model_name} failed: {str(e)}")
+                continue
+        
+        # If no model works, return error
+        if not working_model:
+            error_message = str(last_exception) if last_exception else "No models available"
+            print(f"All models failed. Last error: {error_message}")
+            
+            # Check for specific error types and return appropriate status codes
+            if "insufficient_quota" in error_message or "quota" in error_message.lower():
+                raise HTTPException(status_code=429, detail=error_message)
+            elif "model_not_found" in error_message:
+                raise HTTPException(status_code=404, detail=error_message)
+            elif "authentication" in error_message.lower() or "invalid_api_key" in error_message.lower():
+                raise HTTPException(status_code=401, detail=error_message)
+            else:
+                raise HTTPException(status_code=500, detail=error_message)
+        
         # Create an async generator function for streaming responses
         async def generate():
-            # Create a streaming chat completion request
             stream = client.chat.completions.create(
-                model=request.model,
+                model=working_model,
                 messages=[
-                    {"role": "developer", "content": request.developer_message},
                     {"role": "user", "content": request.user_message}
                 ],
                 stream=True  # Enable streaming response
@@ -57,9 +100,14 @@ async def chat(request: ChatRequest):
         # Return a streaming response to the client
         return StreamingResponse(generate(), media_type="text/plain")
     
+    except HTTPException:
+        # Re-raise HTTP exceptions as they are
+        raise
     except Exception as e:
-        # Handle any errors that occur during processing
-        raise HTTPException(status_code=500, detail=str(e))
+        # Handle any other errors that occur during processing
+        error_message = str(e)
+        print(f"Error in /api/chat: {error_message}")
+        raise HTTPException(status_code=500, detail=error_message)
 
 # Define a health check endpoint to verify API status
 @app.get("/api/health")
